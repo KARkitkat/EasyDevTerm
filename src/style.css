@@ -116,7 +116,15 @@ input, textarea { user-select: text; }
 
 /* Permission edit dialog: dim overlay + centered card (settings-card look). */
 .perm-dialog { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.45); z-index: 998; display: flex; align-items: center; justify-content: center; }
-.perm-box { background: var(--side); border: 1px solid var(--border); border-radius: 6px; padding: 14px 18px; min-width: 240px; color: var(--fg); }
+.perm-box { background: var(--side); border: 1px solid var(--border); border-radius: 6px; padding: 14px; min-width: 240px; color: var(--fg); }
+/* Inputs inside dialogs live outside .panel, so re-apply the panel input look
+   (dark bg, border) here; .sc-label comes along for the label column. */
+.perm-box input { flex: 1; background: var(--bg); color: var(--fg); border: 1px solid var(--border); border-radius: 4px; padding: 6px; min-width: 0; }
+/* Rows in dialogs match the panel rhythm: flex layout (labels + inputs in
+   one line), 6px gap, 8px below each row - same as .panel .row. */
+.perm-box .row { display: flex; gap: 6px; margin-bottom: 8px; }
+.perm-box .row:last-of-type { margin-bottom: 0; }
+.perm-box .sc-label { width: auto; flex: none; margin-right: 6px; }
 .perm-box button { background: var(--accent); color: #fff; border: 0; border-radius: 4px; padding: 6px 12px; cursor: pointer; }
 .perm-box button#perm-cancel { background: transparent; color: var(--accent); border: 1px solid var(--accent); }
 .perm-grid { border-collapse: collapse; margin: 4px auto; }
