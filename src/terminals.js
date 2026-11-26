@@ -99,6 +99,14 @@ function applyTermAppearance(term) {
   const theme = { background: termAppearance.bg || "#1e1e1e", foreground: termAppearance.fg || "#d4d4d4" };
   term.options.fontSize = termAppearance.fontSize;
   term.options.theme = theme;
+  // A fontSize change rebuilds the glyph grid: refit so cols/rows match the
+  // new cell size, otherwise wide chars spill over the neighboring panel.
+  const s = [...sessions.values()].find((x) => x.term === term);
+  if (s) {
+    requestAnimationFrame(() => {
+      try { s.fit.fit(); } catch (_) {}
+    });
+  }
 }
 
 export function createSessionTab(id, label, kind = "serial", meta = {}) {
