@@ -15,8 +15,10 @@ input, textarea { user-select: text; }
 
 #main { flex: 1; display: flex; flex-direction: row; min-width: 0; }
 #term-col { flex: 1; display: flex; flex-direction: column; min-width: 0; }
-#tabbar { display: flex; background: var(--side); border-bottom: 1px solid var(--border); min-height: 32px; align-items: stretch; }
-.tab { display: flex; align-items: center; gap: 6px; padding: 6px 10px; border-right: 1px solid var(--border); cursor: pointer; white-space: nowrap; max-width: 200px; overflow: hidden; }
+/* Tabs scroll horizontally when crowded; scrollbar hidden (wheel/drag works). */
+#tabbar { display: flex; background: var(--side); border-bottom: 1px solid var(--border); min-height: 32px; align-items: stretch; overflow-x: auto; overflow-y: hidden; scrollbar-width: none; flex: none; }
+#tabbar::-webkit-scrollbar { display: none; }
+.tab { display: flex; align-items: center; gap: 6px; padding: 6px 10px; border-right: 1px solid var(--border); cursor: pointer; white-space: nowrap; max-width: 200px; overflow: hidden; flex: none; }
 .tab.active { background: var(--bg); color: var(--accent); border-bottom: 2px solid var(--accent); }
 .tab .tab-close { color: var(--muted); }
 .tab .tab-close:hover { color: #fff; }

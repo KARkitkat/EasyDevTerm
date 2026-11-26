@@ -8,6 +8,7 @@ import {
   closeSession,
   onSessionData,
   onSessionClose,
+  onReconnect,
   sessionKind,
   applyAppearance,
 } from "./terminals.js";
@@ -96,7 +97,10 @@ async function openSerial(port, baud, label) {
       args: { port, baud_rate: baud, label },
       onEvent: channel((msg) => handleSessionEvent(sid, msg)),
     });
-    createSessionTab(sid, label, "serial", { port });
+    createSessionTab(sid, label, "serial", {
+      port,
+      reconnectable: { kind: "serial", port, baud_rate: baud, label },
+    });
     autoLogin.begin(sid, sendToSessionAny, creds?.user, creds?.pass);
     recordDevice({ kind: "serial", port, baud_rate: baud, label });
     return sid;
@@ -115,7 +119,11 @@ async function openTelnet(host, port) {
       args: { host, port, label },
       onEvent: channel((msg) => handleSessionEvent(sid, msg)),
     });
-    createSessionTab(sid, label, "telnet", { ip: host, port });
+    createSessionTab(sid, label, "telnet", {
+      ip: host,
+      port,
+      reconnectable: { kind: "telnet", host, port, label },
+    });
     autoLogin.begin(sid, sendToSessionAny, creds?.user, creds?.pass);
     recordDevice({ kind: "telnet", host, port, label });
     return sid;
@@ -169,7 +177,7 @@ async function renderDeviceHistory(mount) {
         ? saved
             .map(
               (r, i) =>
-                `<div class="list-item ct-hist-item" data-kind="saved" data-idx="${i}">${r.label} <span class="ct-unsave muted" title="从已保存移除" style="float:right">✕</span></div>`
+                `<div class="list-item ct-hist-item" data-kind="saved" data-idx="${i}">${r.note || r.label} <button class="rb-dl ct-edit" title="编辑备注名" style="float:right"><svg viewBox="0 0 16 16" width="14" height="14"><path d="M11.5 2.5a1.4 1.4 0 0 1 2 2L6 12l-3 1 1-3z" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg></button> <span class="ct-unsave muted" title="从已保存移除" style="float:right">✕</span></div>`
             )
             .join("")
         : `<p class="muted" style="margin:0">(空,可在下方最近连接中点击保存图标)</p>`}
@@ -217,6 +225,71 @@ async function renderDeviceHistory(mount) {
       renderDeviceHistory(mount);
     });
   });
+  // Edit a saved connection: note (display name) + target address fields.
+  box.querySelectorAll(".ct-edit").forEach((el) => {
+    el.addEventListener("click", async (ev) => {
+      ev.stopPropagation();
+      const item = ev.target.closest(".ct-hist-item");
+      const idx = parseInt(item.dataset.idx, 10);
+      const s = await invoke("settings_get").catch(() => ({}));
+      const r = (s.saved_devices ?? [])[idx];
+      if (!r) return;
+      const isSerial = r.kind === "serial";
+      const ov = document.createElement("div");
+      ov.className = "perm-dialog";
+      ov.innerHTML = `
+        <div class="perm-box editor-box" style="width:min(420px,90vw)">
+          <p class="sc-title">编辑连接</p>
+          <p class="muted" style="margin:4px 0 8px">${isSerial ? "串口" : "Telnet"} · 原标识: ${r.label}</p>
+          <div class="row"><span class="sc-label" style="width:70px">备注名</span><input id="note-input" placeholder="留空恢复默认" value="${escAttr(r.note || "")}" /></div>
+          ${isSerial
+            ? `<div class="row"><span class="sc-label" style="width:70px">串口</span><input id="edit-port" value="${escAttr(r.port)}" placeholder="如 COM4" /></div>
+               <div class="row"><span class="sc-label" style="width:70px">波特率</span><input id="edit-baud" value="${r.baud_rate}" placeholder="115200" /></div>`
+            : `<div class="row"><span class="sc-label" style="width:70px">IP 地址</span><input id="edit-host" value="${escAttr(r.host)}" placeholder="如 192.168.1.1" /></div>
+               <div class="row"><span class="sc-label" style="width:70px">端口</span><input id="edit-port" value="${r.port}" placeholder="23" /></div>`}
+          <div class="row" style="margin-top:8px">
+            <button id="note-ok" style="flex:1">确定</button>
+            <button id="note-cancel" class="ed-cancel" style="flex:1">取消</button>
+          </div>
+        </div>
+      `;
+      document.body.appendChild(ov);
+      const input = ov.querySelector("#note-input");
+      input.focus();
+      input.select();
+      const close = () => ov.remove();
+      ov.querySelector("#note-cancel").addEventListener("click", close);
+      ov.querySelectorAll("input").forEach((inp) =>
+        inp.addEventListener("keydown", (e) => {
+          if (e.key === "Enter") ov.querySelector("#note-ok").click();
+          if (e.key === "Escape") close();
+        })
+      );
+      ov.querySelector("#note-ok").addEventListener("click", async () => {
+        const note = input.value.trim();
+        close();
+        const cur = await invoke("settings_get").catch(() => ({}));
+        const rec = (cur.saved_devices ?? [])[idx];
+        if (!rec) return;
+        rec.note = note;
+        if (isSerial) {
+          const port = ov.querySelector("#edit-port")?.value.trim();
+          const baud = parseInt(ov.querySelector("#edit-baud")?.value, 10);
+          if (port) rec.port = port;
+          if (baud > 0) rec.baud_rate = baud;
+          rec.label = `${rec.port} @ ${rec.baud_rate}`;
+        } else {
+          const host = ov.querySelector("#edit-host")?.value.trim();
+          const port = parseInt(ov.querySelector("#edit-port")?.value, 10);
+          if (host) rec.host = host;
+          if (port > 0) rec.port = port;
+          rec.label = rec.port === 23 ? `telnet ${rec.host}` : `telnet ${rec.host}:${rec.port}`;
+        }
+        await invoke("settings_set", { settings: cur }).catch(() => {});
+        renderDeviceHistory(mount);
+      });
+    });
+  });
   // Remove from saved list (the record stays in history). The ✕ is plain
   // text so ev.target is the span itself; closest() guards anyway.
   box.querySelectorAll(".ct-unsave").forEach((el) => {
@@ -248,6 +321,11 @@ async function renderDeviceHistory(mount) {
 /// Identity key for a device record (transport + address; label may drift).
 function devKey(r) {
   return r.kind === "serial" ? `serial:${r.port}` : `telnet:${r.host}:${r.port}`;
+}
+
+/// Escape a value for use inside an HTML attribute (double-quoted).
+function escAttr(t) {
+  return String(t).replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;");
 }
 
 export async function showConnectPanel(mode = "serial") {
@@ -1621,6 +1699,13 @@ export function initPanels() {
       sessionState(id, "error", String(e));
       throw e;
     }
+  });
+
+  // Enter on a disconnected tab opens a FRESH connection in a new tab (the
+  // old tab stays as history). Failure shows in the connect panel like usual.
+  onReconnect((s) => {
+    if (s.kind === "telnet") openTelnet(s.reconnectable.host, s.reconnectable.port);
+    else openSerial(s.reconnectable.port, s.reconnectable.baud_rate, s.reconnectable.label);
   });
 
   onSessionClose(async (id) => {

@@ -15,11 +15,16 @@ pub enum DeviceRecord {
         port: String,
         baud_rate: u32,
         label: String,
+        /// User-assigned display name for saved connections ("" = none).
+        #[serde(default)]
+        note: String,
     },
     Telnet {
         host: String,
         port: u16,
         label: String,
+        #[serde(default)]
+        note: String,
     },
 }
 

@@ -26,6 +26,11 @@ export function onSessionClose(cb) {
   sessions._closeCb = cb;
 }
 
+/// panels.js registers: (dead session record) => void. Fired on Enter.
+export function onReconnect(cb) {
+  sessions._reconnectCb = cb;
+}
+
 // Command assistant hooks: list serial sessions / write into one.
 window.__devtermSerialSessions = () =>
   [...sessions.entries()]
@@ -137,6 +142,12 @@ export function createSessionTab(id, label, kind = "serial", meta = {}) {
   term.open(termEl);
   term.onData((data) => {
     const cb = sessions._dataCb;
+    const s = sessions.get(id);
+    // A disconnected session's Enter opens a fresh connection in a new tab.
+    if (s?.dead && data.includes("\r")) {
+      sessions._reconnectCb?.(s);
+      return;
+    }
     if (cb && id === activeId) cb(id, data);
   });
 
@@ -145,6 +156,19 @@ export function createSessionTab(id, label, kind = "serial", meta = {}) {
   tab.innerHTML = `<span class="tab-label"></span><span class="tab-close" title="关闭">✕</span>`;
   tab.querySelector(".tab-label").textContent = label;
   tab.addEventListener("click", () => activateSession(id));
+  // Middle-click closes, like browser tabs. preventDefault on mousedown stops
+  // Windows' autoscroll cursor (the circle) from ever appearing, which also
+  // un-blocks the click; auxclick alone was unreliable in WebView2.
+  tab.addEventListener("mousedown", (e) => {
+    if (e.button === 1) e.preventDefault();
+  });
+  tab.addEventListener("auxclick", (e) => {
+    if (e.button === 1) {
+      e.stopPropagation();
+      e.preventDefault();
+      closeSession(id);
+    }
+  });
   tab.querySelector(".tab-close").addEventListener("click", (e) => {
     e.stopPropagation();
     closeSession(id);
@@ -153,7 +177,7 @@ export function createSessionTab(id, label, kind = "serial", meta = {}) {
   termArea.insertBefore(wrap, welcome);
   tabbar.appendChild(tab);
 
-  s = { term, fit, wrap, tab, label, kind, ip: meta.ip ?? null, port: meta.port ?? null };
+  s = { term, fit, wrap, tab, label, kind, ip: meta.ip ?? null, port: meta.port ?? null, reconnectable: meta.reconnectable ?? null };
   sessions.set(id, s);
   activateSession(id);
   // Let the observer (and any layout) settle, then fit twice: once now and
@@ -190,8 +214,11 @@ export function sessionState(id, state, reason) {
   const s = sessions.get(id);
   if (!s) return;
   if (state === "closed" || state === "error") {
+    s.dead = true;
     s.tab.classList.add("disconnected");
-    s.term.write(`\r\n\x1b[90m── 会话已断开${reason ? ": " + reason : ""} ──\x1b[0m\r\n`);
+    const hint = s.reconnectable ? " ── 按回车重新连接" : "";
+    s.term.write(`\r\n\x1b[90m── 会话已断开${reason ? ": " + reason : ""}${hint} ──\x1b[0m\r\n`);
+    if (activeId === id) s.term.focus();
   }
 }
 
@@ -224,3 +251,9 @@ export function refitAll() {
 const ro = new ResizeObserver(refitAll);
 ro.observe(termArea);
 window.addEventListener("resize", refitAll);
+// Vertical wheel over the tab bar scrolls it horizontally (deltaY -> left).
+tabbar.addEventListener("wheel", (e) => {
+  if (tabbar.scrollWidth <= tabbar.clientWidth) return;
+  e.preventDefault();
+  tabbar.scrollLeft += e.deltaY;
+}, { passive: false });
