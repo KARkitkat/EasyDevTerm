@@ -63,6 +63,13 @@ async function recordDevice(record) {
   } catch (_) {}
 }
 
+/// The TFTP transfer staging dir: always `tftptmp` next to the exe (created
+/// by the backend on demand). Every transfer stages here, then copies out to
+/// wherever the user asked for - one fixed relay, no dir switching.
+async function defaultTftpDir() {
+  return await invoke("tftp_default_dir").catch(() => "");
+}
+
 /* ---------- connecting overlay: blocks the whole UI until connect settles ---------- */
 
 let connectLockEl = null;
@@ -551,6 +558,7 @@ export async function showTftpPanel() {
     <div id="rb-list" class="scroll-list"></div>
     <div class="row" id="rb-upload-row" style="display:none;align-items:stretch;margin-top:6px">
       <button id="rb-upload" class="rb-upload" title="选择 PC 文件上传到当前目录" style="flex:1;margin-top:0">上传</button>
+      <button id="rb-transfers" title="传输记录" style="padding:6px 8px;line-height:0"><svg viewBox="0 0 16 16" width="14" height="14"><path d="M5.5 13.5v-11M2.5 5.5l3-3 3 3M10.5 2.5v11M7.5 10.5l3 3 3-3" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
       <button id="rb-adv" title="TFTP 服务端 / 客户端工具" style="padding:6px 8px;line-height:0"><svg viewBox="0 0 16 16" width="14" height="14"><path d="M9.7 2.9a3.6 3.6 0 0 0-4.9 4.3L1.5 10.5a1.3 1.3 0 0 0 0 1.8l2.2 2.2a1.3 1.3 0 0 0 1.8 0l3.3-3.3a3.6 3.6 0 0 0 4.3-4.9L10.5 9 7 5.5l2.7-2.6z" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
     </div>
 
@@ -585,8 +593,10 @@ export async function showTftpPanel() {
     </div>
     <div id="cf-body"></div>
 
+    <div id="transfers-block" style="display:none">
     <h3 style="margin-top:14px">传输记录</h3>
     <div id="tf-transfers" class="scroll-list muted">暂无传输</div>
+    </div>
   `;
 
   /* --- router browser (hidden session) --- */
@@ -597,12 +607,20 @@ export async function showTftpPanel() {
   let cwd = "/";
 
   function rshArgs() {
-    return {
-      host: p.querySelector("#rb-host").value.trim(),
-      port: parseInt(p.querySelector("#rb-port").value, 10) || 23,
-      user: p.querySelector("#rb-user").value.trim() || "root",
-      password: p.querySelector("#rb-pass").value,
-    };
+    const host = p.querySelector("#rb-host").value.trim();
+    const port = parseInt(p.querySelector("#rb-port").value, 10) || 23;
+    // Fall back to the auto-login credentials for this device (same rules the
+    // terminal sessions use) when the user left the fields empty.
+    let user = p.querySelector("#rb-user").value.trim();
+    let password = p.querySelector("#rb-pass").value;
+    if (!user || !password) {
+      const creds = autoLogin.credentialsFor(`${host}:${port}`);
+      if (creds) {
+        if (!user) user = creds.user || "";
+        if (!password) password = creds.pass || "";
+      }
+    }
+    return { host, port, user: user || "root", password };
   }
 
   async function saveRshSettings() {
@@ -611,6 +629,14 @@ export async function showTftpPanel() {
     s.telnet_password = p.querySelector("#rb-pass").value;
     await invoke("settings_set", { settings: s }).catch(() => {});
   }
+
+  // File-row icon buttons (stroke style, same family as the download icon).
+  const RB_ICONS = {
+    open: `<svg viewBox="0 0 16 16" width="14" height="14"><path d="M6.5 3.5h-3a1 1 0 0 0-1 1v8a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1v-3M9.5 2.5h4v4M13 3 8.5 7.5" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
+    rename: `<svg viewBox="0 0 16 16" width="14" height="14"><path d="M8 4v8M4 3h8M4 13h8" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>`,
+    del: `<svg viewBox="0 0 16 16" width="14" height="14"><path d="M2.5 4h11M5.5 4V2.5a1 1 0 0 1 1-1h3a1 1 0 0 1 1 1V4M4 4l.7 9a1 1 0 0 0 1 .9h4.6a1 1 0 0 0 1-.9L12 4M6.5 6.5v5M9.5 6.5v5" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
+    perm: `<svg viewBox="0 0 16 16" width="14" height="14"><rect x="3" y="7" width="10" height="7" rx="1" fill="none" stroke="currentColor" stroke-width="1.3"/><path d="M5.5 7V5a2.5 2.5 0 0 1 5 0v2" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>`,
+  };
 
   async function browse(path) {
     rbStatus.textContent = `读取 ${path} …`;
@@ -624,14 +650,20 @@ export async function showTftpPanel() {
         ? entries
             .map(
               (e) =>
-                `<div class="list-item rb-entry" data-name="${e.name}" data-dir="${e.is_dir}">${e.is_dir ? "📁" : "📄"} <span class="rb-name">${e.name}${e.is_dir ? "/" : ""}</span>${e.is_dir ? "" : `<button class="rb-dl" title="下载到 PC"><svg viewBox="0 0 16 16" width="14" height="14"><path d="M8 1v8M4.5 5.5 8 9l3.5-3.5M2 11.5V13a1 1 0 0 0 1 1h10a1 1 0 0 0 1-1v-1.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg></button>`}</div>`
+                `<div class="list-item rb-entry" data-name="${e.name}" data-dir="${e.is_dir}">${e.is_dir ? "📁" : "📄"} <span class="rb-name">${e.name}${e.is_dir ? "/" : ""}</span>${e.is_dir ? "" :
+                  `<button class="rb-dl" title="下载到 PC"><svg viewBox="0 0 16 16" width="14" height="14"><path d="M8 1v8M4.5 5.5 8 9l3.5-3.5M2 11.5V13a1 1 0 0 0 1 1h10a1 1 0 0 0 1-1v-1.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg></button>` +
+                  `<button class="rb-dl rb-open" title="下载到本地并用默认编辑器打开,关闭后若有修改则回传设备">${RB_ICONS.open}</button>` +
+                  `<button class="rb-dl rb-rename" title="重命名">${RB_ICONS.rename}</button>` +
+                  `<button class="rb-dl rb-del" title="删除">${RB_ICONS.del}</button>` +
+                  `<button class="rb-dl rb-perm" title="权限">${RB_ICONS.perm}</button>`
+                }</div>`
             )
             .join("")
         : `<p class="muted">(空目录)</p>`;
       rbStatus.textContent = "";
       rbList.querySelectorAll(".rb-entry").forEach((el) => {
         el.addEventListener("click", async (ev) => {
-          if (ev.target.classList.contains("rb-dl")) return; // download btn handles itself
+          if (ev.target.closest(".rb-dl")) return; // icon buttons handle themselves
           if (el.dataset.dir === "true") {
             const name = el.dataset.name;
             const next = cwd === "/" ? `/${name}` : `${cwd}/${name}`;
@@ -643,7 +675,11 @@ export async function showTftpPanel() {
         btn.addEventListener("click", async (ev) => {
           ev.stopPropagation();
           const name = btn.closest(".rb-entry").dataset.name;
-          await downloadFile(name);
+          if (btn.classList.contains("rb-open")) await openFile(name);
+          else if (btn.classList.contains("rb-rename")) await renameFile(name);
+          else if (btn.classList.contains("rb-del")) await deleteFile(name);
+          else if (btn.classList.contains("rb-perm")) await editPerms(name);
+          else await downloadFile(name);
         });
       });
     } catch (e) {
@@ -664,22 +700,64 @@ export async function showTftpPanel() {
     }
   }
 
-  // Auto-connect when following an active telnet window (password empty = user
-  // must fill it first; then they press 连接).
-  if (followIp && (p.querySelector("#rb-pass").value || settings.telnet_password)) {
-    doConnect();
+  // Auto-connect when following an active telnet window: credentials may come
+  // from the form, saved telnet settings, or the auto-login config.
+  if (followIp) {
+    const a = rshArgs();
+    if (a.password || !a.user) doConnect();
   }
   p.querySelector("#rb-up").addEventListener("click", () => {
     if (cwd !== "/") browse(cwd.replace(/\/[^/]*$/, "") || "/");
   });
   p.querySelector("#rb-refresh").addEventListener("click", () => browse(cwd));
 
+  /// Ensure the TFTP server runs on the relay dir (tftptmp). Returns the
+  /// actual port (69, or a fallback when 69 was taken) or null on failure.
+  async function ensureTftpServer() {
+    const srvPort = parseInt(portInput?.value ?? "69", 10) || 69;
+    const running = await invoke("tftp_server_status").catch(() => false);
+    if (running) return srvPort;
+    rbStatus.textContent = "自动启动 TFTP 服务端…";
+    try {
+      const evCh = channel((msg) => {
+        const ev = typeof msg === "string" ? JSON.parse(msg) : msg;
+        if (ev.kind === "start") {
+          setTransferRow(ev.dir, ev.file, "0%", ev.total != null ? `${ev.total}B ← ${ev.peer ?? ""}` : `← ${ev.peer ?? ""}`);
+        } else if (ev.kind === "progress") {
+          const pct = ev.total ? Math.min(99, Math.floor((ev.bytes / ev.total) * 100)) : 99;
+          setTransferRow(ev.dir, ev.file, `${pct}%`, `${ev.bytes}B`);
+        } else if (ev.kind === "done") {
+          setTransferRow(ev.dir, ev.file, "成功", `${ev.bytes}B ${ev.speed ?? ""}B/s`, "ok");
+          refreshFiles();
+        } else if (ev.kind === "error") {
+          setTransferRow(ev.dir, ev.file, "失败", ev.message, "fail");
+        }
+      });
+      const r = await invoke("tftp_server_start", { args: { dir: await defaultTftpDir(), port: srvPort }, onEvent: evCh });
+      srvStatus.textContent = "运行中";
+      toggleBtn.textContent = "停止";
+      toggleBtn.classList.add("stop");
+      let port = srvPort;
+      const m = /随机端口 (\d+)/.exec(r);
+      if (m) {
+        port = parseInt(m[1], 10);
+        portInput.value = port;
+      }
+      return port;
+    } catch (e) {
+      rbStatus.textContent = `服务端启动失败: ${e}`;
+      return null;
+    }
+  }
+
   /* --- download: device pushes file to PC server dir, then save-as --- */
   async function downloadFile(name) {
     const host = p.querySelector("#rb-host").value.trim();
     if (!host) { rbStatus.textContent = "未填写路由器 IP"; return; }
-    const srvDir = dirInput ? dirInput.value.trim() : "";
-    if (!srvDir) { rbStatus.textContent = "请先填写 TFTP 服务目录(传输中转用)"; return; }
+    // relay is always tftptmp; show it in the input for transparency
+    const srvDir = await defaultTftpDir();
+    if (!srvDir) { rbStatus.textContent = "无法确定服务目录"; return; }
+    if (dirInput && !dirInput.value.trim()) dirInput.value = srvDir;
 
     // choose where to save
     let savePath;
@@ -692,36 +770,8 @@ export async function showTftpPanel() {
     if (!savePath) return;
 
     // ensure server running (device pushes into it)
-    let srvPort = parseInt(portInput?.value ?? "69", 10) || 69;
-    const running = await invoke("tftp_server_status").catch(() => false);
-    if (!running) {
-      rbStatus.textContent = "自动启动 TFTP 服务端…";
-      try {
-        const evCh = channel((msg) => {
-          const ev = typeof msg === "string" ? JSON.parse(msg) : msg;
-          if (ev.kind === "start") {
-            setTransferRow(ev.dir, ev.file, "0%", ev.total != null ? `${ev.total}B ← ${ev.peer ?? ""}` : `← ${ev.peer ?? ""}`);
-          } else if (ev.kind === "progress") {
-            const pct = ev.total ? Math.min(99, Math.floor((ev.bytes / ev.total) * 100)) : 99;
-            setTransferRow(ev.dir, ev.file, `${pct}%`, `${ev.bytes}B`);
-          } else if (ev.kind === "done") {
-            setTransferRow(ev.dir, ev.file, "成功", `${ev.bytes}B ${ev.speed ?? ""}B/s`, "ok");
-          } else if (ev.kind === "error") {
-            setTransferRow(ev.dir, ev.file, "失败", ev.message, "fail");
-          }
-        });
-        const r = await invoke("tftp_server_start", { args: { dir: srvDir, port: srvPort }, onEvent: evCh });
-        srvStatus.textContent = "运行中";
-        toggleBtn.textContent = "停止";
-        toggleBtn.classList.add("stop");
-        const m = /随机端口 (\d+)/.exec(r);
-        if (m) srvPort = parseInt(m[1], 10);
-        portInput.value = srvPort;
-      } catch (e) {
-        rbStatus.textContent = `服务端启动失败: ${e}`;
-        return;
-      }
-    }
+    const srvPort = await ensureTftpServer();
+    if (srvPort == null) return;
 
     const pcIp = await invoke("local_ip_toward", { dst: host }).catch((e) => { rbStatus.textContent = String(e); return null; });
     if (!pcIp) return;
@@ -751,6 +801,340 @@ export async function showTftpPanel() {
     }
   }
 
+  /* --- open: device pushes file to tftptmp, built-in editor shows it,
+         "save" writes back to the device (permissions preserved) --- */
+  async function openFile(name) {
+    const host = p.querySelector("#rb-host").value.trim();
+    if (!host) { rbStatus.textContent = "未填写路由器 IP"; return; }
+    const relayDir = await defaultTftpDir();
+    if (!relayDir) { rbStatus.textContent = "无法确定服务目录"; return; }
+    const srvPort = await ensureTftpServer();
+    if (srvPort == null) return;
+    const pcIp = await invoke("local_ip_toward", { dst: host }).catch((e) => { rbStatus.textContent = String(e); return null; });
+    if (!pcIp) return;
+
+    const remote = cwd === "/" ? `/${name}` : `${cwd}/${name}`;
+    const portArg = srvPort === 69 ? "" : ` ${srvPort}`;
+    rbStatus.textContent = `读取 ${name}…`;
+    try {
+      // remember current permissions so the write-back keeps them
+      const lsOut = await invoke("rsh_exec", { args: rshArgs(), cmd: `ls -l '${remote}' 2>&1` });
+      const permMatch = /(?:^|\s)([-dl][rwxstST-]{9})/.exec(lsOut || "");
+      const permStr = permMatch ? permMatch[1] : "";
+
+      setTransferRow("open", name, "0%", `← ${remote}`);
+      const pushOut = (await invoke("rsh_exec", {
+        args: rshArgs(),
+        cmd: `tftp -p -l '${remote}' -r '${name}' ${pcIp}${portArg}`,
+      }) || "").trim();
+      if (pushOut) {
+        setTransferRow("open", name, "失败", pushOut, "fail");
+        rbStatus.textContent = `读取失败: ${pushOut}`;
+        return;
+      }
+
+      // load the local copy into the built-in editor
+      const localPath = `${relayDir}\\${name}`;
+      const b64 = await invoke("read_file_base64", { path: localPath });
+      const bin = atob(b64);
+      const bytes = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+      if (bytes.includes(0)) {
+        setTransferRow("open", name, "失败", "二进制文件", "fail");
+        rbStatus.textContent = "二进制文件,内置编辑器不支持,请使用下载";
+        return;
+      }
+      const dec = new TextDecoder("utf-8", { fatal: false });
+      const text = dec.decode(bytes);
+      if (text.includes("\uFFFD")) {
+        rbStatus.textContent = "提示: 非 UTF-8 文本,保存可能损坏编码";
+      }
+
+      // editor dialog (same overlay family as the permission dialog)
+      const ov = document.createElement("div");
+      ov.className = "perm-dialog";
+      ov.innerHTML = `
+        <div class="perm-box editor-box">
+          <p class="sc-title">${name}</p>
+          <p class="muted" style="margin:4px 0 8px">${permStr || ""}</p>
+          <div class="ed-wrap">
+            <pre id="ed-gutter" aria-hidden="true"></pre>
+            <textarea id="ed-text" spellcheck="false"></textarea>
+          </div>
+          <div class="ed-findbar">
+            <input id="ed-find" placeholder="查找" style="flex:2" />
+            <input id="ed-replace" placeholder="替换为" style="flex:2" />
+            <button id="ed-find-next" title="查找下一个(Enter)">下一个</button>
+            <button id="ed-replace-one" title="替换当前,再查找下一个">替换</button>
+            <button id="ed-replace-all" title="替换全部">全部</button>
+            <span id="ed-find-status" class="muted"></span>
+            <input id="ed-goto" placeholder="跳转行号" class="ed-goto" />
+            <button id="ed-goto-go" title="跳到指定行(光标定位)">跳转</button>
+          </div>
+          <div class="ed-findbar">
+            <span id="ed-save-note" class="muted" style="flex:1"></span>
+            <button id="ed-save">保存</button>
+            <button id="ed-cancel" class="ed-cancel">取消</button>
+          </div>
+        </div>
+      `;
+      document.body.appendChild(ov);
+      const ta = ov.querySelector("#ed-text");
+      const gutter = ov.querySelector("#ed-gutter");
+      ta.value = text;
+      // line-number gutter: rebuild on input, scroll-lock with the textarea
+      const renderGutter = () => {
+        const n = ta.value.split("\n").length;
+        let s = "";
+        for (let i = 1; i <= n; i++) s += i + "\n";
+        gutter.textContent = s;
+      };
+      renderGutter();
+      ta.addEventListener("input", () => {
+        renderGutter();
+        findState.from = 0; // content changed: restart search from the top
+      });
+      ta.addEventListener("scroll", () => {
+        gutter.scrollTop = ta.scrollTop;
+      });
+
+      /* --- find & replace / goto --- */
+      const findState = { from: 0 };
+      const findInput = ov.querySelector("#ed-find");
+      const findStatus = ov.querySelector("#ed-find-status");
+      const setSel = (start, len) => {
+        ta.focus();
+        ta.setSelectionRange(start, start + len);
+        // scroll the selection into view (textarea has no scrollIntoView;
+        // estimate the line and scroll by line height)
+        const line = ta.value.slice(0, start).split("\n").length - 1;
+        const lh = 18; // 12px * 1.5
+        const target = line * lh - ta.clientHeight / 2;
+        ta.scrollTop = Math.max(0, target);
+        gutter.scrollTop = ta.scrollTop;
+      };
+      const doFind = (from) => {
+        const needle = findInput.value;
+        if (!needle) { findStatus.textContent = ""; return -1; }
+        const idx = ta.value.indexOf(needle, from);
+        if (idx < 0) {
+          // wrap once
+          const wrapped = ta.value.indexOf(needle, 0);
+          if (wrapped < 0) { findStatus.textContent = "未找到"; return -1; }
+          findStatus.textContent = "已从头开始";
+          setSel(wrapped, needle.length);
+          findState.from = wrapped + needle.length;
+          return wrapped;
+        }
+        setSel(idx, needle.length);
+        findState.from = idx + needle.length;
+        return idx;
+      };
+      ov.querySelector("#ed-find-next").addEventListener("click", () => doFind(findState.from));
+      findInput.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") { e.preventDefault(); doFind(findState.from); }
+        if (e.key === "Escape") findInput.blur();
+      });
+      ov.querySelector("#ed-replace-one").addEventListener("click", () => {
+        const needle = findInput.value;
+        const repl = ov.querySelector("#ed-replace").value;
+        if (!needle) return;
+        const sel = ta.value.indexOf(needle, findState.from);
+        const at = sel >= 0 ? sel : ta.value.indexOf(needle, 0); // use selection if it matches
+        const start = ta.selectionStart;
+        if (ta.value.slice(start, ta.selectionEnd) === needle) {
+          ta.setRangeText(repl, start, ta.selectionEnd, "end");
+          ta.dispatchEvent(new Event("input"));
+          doFind(ta.selectionStart);
+        } else {
+          // selection isn't a match: find the next one first
+          const idx = at >= 0 ? at : -1;
+          if (idx < 0) { findStatus.textContent = "未找到"; return; }
+          ta.setRangeText(repl, idx, idx + needle.length, "end");
+          ta.dispatchEvent(new Event("input"));
+          doFind(idx + repl.length);
+        }
+      });
+      ov.querySelector("#ed-replace-all").addEventListener("click", () => {
+        const needle = findInput.value;
+        const repl = ov.querySelector("#ed-replace").value;
+        if (!needle) return;
+        ta.value = ta.value.split(needle).join(repl);
+        ta.dispatchEvent(new Event("input"));
+        findStatus.textContent = "已全部替换";
+      });
+      const doGoto = () => {
+        const v = parseInt(ov.querySelector("#ed-goto").value, 10);
+        const lines = ta.value.split("\n");
+        if (!v || v < 1 || v > lines.length) return;
+        // char offset of the start of line v
+        let off = 0;
+        for (let i = 0; i < v - 1; i++) off += lines[i].length + 1;
+        setSel(off, 0);
+      };
+      ov.querySelector("#ed-goto-go").addEventListener("click", doGoto);
+      ov.querySelector("#ed-goto").addEventListener("keydown", (e) => {
+        if (e.key === "Enter") { e.preventDefault(); doGoto(); }
+        if (e.key === "Escape") e.target.blur();
+      });
+      ov.querySelector("#ed-cancel").addEventListener("click", () => {
+        ov.remove();
+        setTransferRow("open", name, "成功", "未修改", "ok");
+        rbStatus.textContent = "已取消(设备文件未动)";
+      });
+      ov.querySelector("#ed-save").addEventListener("click", async () => {
+        const edited = ov.querySelector("#ed-text").value;
+        ov.remove();
+        rbStatus.textContent = "写入本地副本…";
+        try {
+          const newBytes = new TextEncoder().encode(edited);
+          let binStr = "";
+          newBytes.forEach((b) => (binStr += String.fromCharCode(b)));
+          await invoke("write_file_base64", { path: localPath, dataBase64: btoa(binStr) });
+
+          setTransferRow("open", name, "0%", `回传 ${remote}`);
+          rbStatus.textContent = "回传到设备…";
+          const pullOut = (await invoke("rsh_exec", {
+            args: rshArgs(),
+            cmd: `tftp -g -l '${remote}' -r '${name}' ${pcIp}${portArg}`,
+          }) || "").trim();
+          if (pullOut) {
+            setTransferRow("open", name, "失败", pullOut, "fail");
+            rbStatus.textContent = `回传失败: ${pullOut}`;
+            return;
+          }
+          if (permStr) {
+            const oct = permToOctal(permStr.slice(1));
+            if (oct) await invoke("rsh_exec", { args: rshArgs(), cmd: `chmod ${oct} '${remote}'` });
+          }
+          setTransferRow("open", name, "成功", `回传 ${remote}`, "ok");
+          rbStatus.textContent = "修改已回传设备";
+          refreshFiles();
+        } catch (e) {
+          rbStatus.textContent = String(e);
+        }
+      });
+    } catch (e) {
+      rbStatus.textContent = String(e);
+    }
+  }
+
+  /// "rwxr-xr--" -> "754" (u/g/o rwx bits only; sticky/setuid not handled).
+  function permToOctal(s) {
+    const tri = (t) =>
+      (t[0] === "r" ? 4 : 0) + (t[1] === "w" ? 2 : 0) + (t[2] === "x" ? 1 : 0);
+    return `${tri(s.slice(0, 3))}${tri(s.slice(3, 6))}${tri(s.slice(6, 9))}`;
+  }
+
+  /* --- rename / delete / perms: single rsh_exec each --- */
+  async function renameFile(name) {
+    const newName = prompt("新文件名:", name);
+    if (!newName || newName === name) return;
+    if (/['"\\/$]/.test(newName)) { rbStatus.textContent = "文件名含非法字符"; return; }
+    const oldPath = cwd === "/" ? `/${name}` : `${cwd}/${name}`;
+    const newPath = cwd === "/" ? `/${newName}` : `${cwd}/${newName}`;
+    rbStatus.textContent = "重命名中…";
+    try {
+      const out = (await invoke("rsh_exec", {
+        args: rshArgs(),
+        cmd: `mv '${oldPath}' '${newPath}' 2>&1`,
+      }) || "").trim();
+      if (out) { rbStatus.textContent = `重命名失败: ${out}`; return; }
+      rbStatus.textContent = `已重命名为 ${newName}`;
+      browse(cwd);
+    } catch (e) {
+      rbStatus.textContent = String(e);
+    }
+  }
+
+  async function deleteFile(name) {
+    if (!confirm(`确定删除设备上的 ${name} ?此操作不可恢复。`)) return;
+    const path = cwd === "/" ? `/${name}` : `${cwd}/${name}`;
+    rbStatus.textContent = "删除中…";
+    try {
+      const out = (await invoke("rsh_exec", {
+        args: rshArgs(),
+        cmd: `rm -f '${path}' 2>&1`,
+      }) || "").trim();
+      if (out) { rbStatus.textContent = `删除失败: ${out}`; return; }
+      rbStatus.textContent = `已删除 ${name}`;
+      browse(cwd);
+    } catch (e) {
+      rbStatus.textContent = String(e);
+    }
+  }
+
+  async function editPerms(name) {
+    const path = cwd === "/" ? `/${name}` : `${cwd}/${name}`;
+    rbStatus.textContent = "读取权限…";
+    let permStr = "";
+    try {
+      const lsOut = await invoke("rsh_exec", { args: rshArgs(), cmd: `ls -l '${path}' 2>&1` });
+      const m = /(?:^|\s)([-dl][rwxstST-]{9})/.exec(lsOut || "");
+      if (!m) { rbStatus.textContent = "无法解析权限(设备输出格式不同)"; return; }
+      permStr = m[1];
+    } catch (e) {
+      rbStatus.textContent = String(e);
+      return;
+    }
+    rbStatus.textContent = "";
+
+    // lightweight dialog: 3x3 checkbox grid (u/g/o x r/w/x) + octal readout
+    const ov = document.createElement("div");
+    ov.className = "perm-dialog";
+    const tri = (t) =>
+      (t[0] === "r" ? 4 : 0) + (t[1] === "w" ? 2 : 0) + (t[2] === "x" ? 1 : 0);
+    // permStr still carries the file-type char ("-rw-r--r--"): drop it so the
+    // u/g/o triads align, then pre-check the grid from the real permissions.
+    const perms = permStr.slice(1);
+    const cur = [tri(perms.slice(0, 3)), tri(perms.slice(3, 6)), tri(perms.slice(6, 9))];
+    ov.innerHTML = `
+      <div class="perm-box">
+        <p class="sc-title">${name}</p>
+        <p class="muted" style="margin:4px 0 8px">当前权限: ${permStr}</p>
+        <table class="perm-grid">
+          <tr><th></th><th>r</th><th>w</th><th>x</th></tr>
+          <tr><th>u</th><td><input type="checkbox" data-p="0" data-b="4"${cur[0] & 4 ? " checked" : ""}/></td><td><input type="checkbox" data-p="0" data-b="2"${cur[0] & 2 ? " checked" : ""}/></td><td><input type="checkbox" data-p="0" data-b="1"${cur[0] & 1 ? " checked" : ""}/></td></tr>
+          <tr><th>g</th><td><input type="checkbox" data-p="1" data-b="4"${cur[1] & 4 ? " checked" : ""}/></td><td><input type="checkbox" data-p="1" data-b="2"${cur[1] & 2 ? " checked" : ""}/></td><td><input type="checkbox" data-p="1" data-b="1"${cur[1] & 1 ? " checked" : ""}/></td></tr>
+          <tr><th>o</th><td><input type="checkbox" data-p="2" data-b="4"${cur[2] & 4 ? " checked" : ""}/></td><td><input type="checkbox" data-p="2" data-b="2"${cur[2] & 2 ? " checked" : ""}/></td><td><input type="checkbox" data-p="2" data-b="1"${cur[2] & 1 ? " checked" : ""}/></td></tr>
+        </table>
+        <p class="muted" style="margin:8px 0">八进制: <b id="perm-oct">${cur[0]}${cur[1]}${cur[2]}</b></p>
+        <div class="row" style="margin-top:6px">
+          <button id="perm-ok" style="flex:1">应用</button>
+          <button id="perm-cancel" style="flex:1">取消</button>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(ov);
+    const octEl = ov.querySelector("#perm-oct");
+    const readOct = () => {
+      const v = [0, 0, 0];
+      ov.querySelectorAll("input:checked").forEach((c) => {
+        v[parseInt(c.dataset.p, 10)] += parseInt(c.dataset.b, 10);
+      });
+      octEl.textContent = v.join("");
+      return v.join("");
+    };
+    ov.querySelectorAll("input").forEach((c) => c.addEventListener("change", readOct));
+    ov.querySelector("#perm-cancel").addEventListener("click", () => ov.remove());
+    ov.querySelector("#perm-ok").addEventListener("click", async () => {
+      const oct = readOct();
+      ov.remove();
+      rbStatus.textContent = "应用权限…";
+      try {
+        const out = (await invoke("rsh_exec", {
+          args: rshArgs(),
+          cmd: `chmod ${oct} '${path}' 2>&1`,
+        }) || "").trim();
+        if (out) { rbStatus.textContent = `chmod 失败: ${out}`; return; }
+        rbStatus.textContent = `权限已更新为 ${oct}`;
+        browse(cwd);
+      } catch (e) {
+        rbStatus.textContent = String(e);
+      }
+    });
+  }
+
   /* --- upload: pick PC files -> server dir -> hidden-session tftp -g --- */
   p.querySelector("#rb-upload").addEventListener("click", async () => {
     const host = p.querySelector("#rb-host").value.trim();
@@ -768,8 +1152,8 @@ export async function showTftpPanel() {
 
     let srvDir = dirInput ? dirInput.value.trim() : "";
     if (!srvDir) {
-      // default the server dir to the first picked file's folder
-      srvDir = paths[0].replace(/[\\/][^\\/]+$/, "");
+      // relay is always tftptmp next to the exe
+      srvDir = await defaultTftpDir();
       dirInput.value = srvDir;
     }
 
@@ -869,6 +1253,16 @@ export async function showTftpPanel() {
   // own the row during transfer ([0%]→[99%] updated in place), finalized as
   // [成功]/[失败]. Cap 100 rows.
   const transferRows = new Map(); // dir+file -> element
+  const transfersBtn = p.querySelector("#rb-transfers");
+
+  /// Track in-flight transfers: a set of dir+file keys not yet finalized.
+  /// The transfers button pulses while the set is non-empty.
+  const activeTransfers = new Set();
+  function transferBusy(key, busy) {
+    if (busy) activeTransfers.add(key);
+    else activeTransfers.delete(key);
+    transfersBtn.classList.toggle("xfer-active", activeTransfers.size > 0);
+  }
 
   function transferRow(dir, file) {
     const key = `${dir}:${file}`;
@@ -893,10 +1287,13 @@ export async function showTftpPanel() {
   }
 
   function setTransferRow(dir, file, tag, detail = "", cls = "") {
+    const key = `${dir}:${file}`;
     const el = transferRow(dir, file);
-    el.dataset.key = `${dir}:${file}`;
+    el.dataset.key = key;
     el.textContent = `[${tag}] ${file}${detail ? " " + detail : ""}`;
     el.style.color = cls === "fail" ? "#e06c75" : cls === "ok" ? "#98c379" : "";
+    // busy while a percentage/first-contact tag shows; done on 成功/失败
+    transferBusy(key, !["成功", "失败"].includes(tag) && !tag.startsWith("提示"));
   }
 
   function addTransfer(text) {
@@ -979,6 +1376,11 @@ export async function showTftpPanel() {
     const adv = p.querySelector("#tftp-adv");
     adv.style.display = adv.style.display === "none" ? "" : "none";
   });
+  // Transfers toggle: same behavior, for the transfer log block.
+  p.querySelector("#rb-transfers").addEventListener("click", () => {
+    const blk = p.querySelector("#transfers-block");
+    blk.style.display = blk.style.display === "none" ? "" : "none";
+  });
 
   // draggable list heights (persisted in settings.ui_heights)
   const defaults = { rb_list: 260, tf_files: 220, tf_transfers: 160 };
@@ -997,7 +1399,10 @@ export async function showTftpPanel() {
   p.querySelector("#cf-up").addEventListener("click", async () => {
     cfBody.innerHTML = `
       <p class="muted">选择要上传的文件(设备将用 tftp -g 拉取)</p>
-      <div class="row"><input id="cf-upfile" placeholder="文件完整路径,如 C:\\tftp\\fw.bin" /></div>
+      <div class="row">
+        <input id="cf-upfile" placeholder="文件完整路径,如 C:\\tftp\\fw.bin" />
+        <button id="cf-upbrowse" class="rb-dl" title="选择文件" style="padding:6px 8px;line-height:0"><svg viewBox="0 0 16 16" width="14" height="14"><path d="M1.5 3.5a1 1 0 0 1 1-1h3l1.5 2h6a1 1 0 0 1 1 1v7a1 1 0 0 1-1 1h-10.5a1 1 0 0 1-1-1z" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+      </div>
       <div class="row">
         <select id="cf-upip">${ips.map((ip) => `<option ${ip === settings.cmd_upload_ip ? "selected" : ""}>${ip}</option>`).join("")}</select>
       </div>
@@ -1008,6 +1413,11 @@ export async function showTftpPanel() {
       <p class="muted" id="cf-upstatus"></p>
     `;
     const st = cfBody.querySelector("#cf-upstatus");
+    // folder icon: pick a file and fill the path input
+    cfBody.querySelector("#cf-upbrowse").addEventListener("click", async () => {
+      const picked = await invoke("pick_files").catch(() => []);
+      if (picked && picked.length) cfBody.querySelector("#cf-upfile").value = picked[0];
+    });
     function genCmd() {
       const path = cfBody.querySelector("#cf-upfile").value.trim();
       const name = path.split(/[\\/]/).pop();
@@ -1019,10 +1429,10 @@ export async function showTftpPanel() {
       if (!path) { st.textContent = "先填文件路径"; return; }
       await navigator.clipboard.writeText(cmd).catch(() => {});
       st.textContent = `已复制: ${cmd}`;
-      // copy file into server dir so the device can pull it
-      const s = await invoke("settings_get").catch(() => ({}));
-      if (s.tftp_dir) {
-        try { await invoke("tftp_copy_in", { src: path, name }); refreshFiles(); } catch (_) {}
+      // copy file into the relay dir so the device can pull it
+      const d = await defaultTftpDir();
+      if (d) {
+        try { await invoke("tftp_copy_in", { dir: d, src: path, name }); refreshFiles(); } catch (_) {}
       }
       saveTftpSettings({ cmd_upload_ip: ip });
     });
@@ -1030,14 +1440,18 @@ export async function showTftpPanel() {
       const { cmd, path, ip } = genCmd();
       if (!path) { st.textContent = "先填文件路径"; return; }
       saveTftpSettings({ cmd_upload_ip: ip });
-      sendToSerial(p, cmd, st, "串口可见执行");
+      sendTftpToActive(cmd, st, { localFile: path });
     });
   });
 
   p.querySelector("#cf-down").addEventListener("click", () => {
     cfBody.innerHTML = `
-      <p class="muted">设备将用 tftp -p 把文件推到 PC 服务目录</p>
+      <p class="muted">设备将用 tftp -p 把文件推到 PC 服务目录,完成后自动转到保存路径</p>
       <div class="row"><input id="cf-dnname" value="${settings.cmd_download_name ?? ""}" placeholder="远端文件名" /></div>
+      <div class="row">
+        <input id="cf-dnsave" placeholder="本地保存路径,如 C:\\Users\\me\\Desktop\\fw.bin" />
+        <button id="cf-dnbrowse" class="rb-dl" title="选择保存位置" style="padding:6px 8px;line-height:0"><svg viewBox="0 0 16 16" width="14" height="14"><path d="M1.5 3.5a1 1 0 0 1 1-1h3l1.5 2h6a1 1 0 0 1 1 1v7a1 1 0 0 1-1 1h-10.5a1 1 0 0 1-1-1z" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+      </div>
       <div class="row">
         <select id="cf-dnip">${ips.map((ip) => `<option ${ip === settings.cmd_download_ip ? "selected" : ""}>${ip}</option>`).join("")}</select>
       </div>
@@ -1048,6 +1462,12 @@ export async function showTftpPanel() {
       <p class="muted" id="cf-dnstatus"></p>
     `;
     const st = cfBody.querySelector("#cf-dnstatus");
+    // save-path picker: ask where to put the downloaded file
+    cfBody.querySelector("#cf-dnbrowse").addEventListener("click", async () => {
+      const name = cfBody.querySelector("#cf-dnname").value.trim() || "download.bin";
+      const pth = await invoke("pick_save_path", { defaultName: name }).catch(() => "");
+      if (pth) cfBody.querySelector("#cf-dnsave").value = pth;
+    });
     function genCmd() {
       const name = cfBody.querySelector("#cf-dnname").value.trim();
       const ip = cfBody.querySelector("#cf-dnip").value;
@@ -1060,11 +1480,52 @@ export async function showTftpPanel() {
       st.textContent = `已复制: ${cmd}`;
       saveTftpSettings({ cmd_download_ip: ip, cmd_download_name: name });
     });
-    cfBody.querySelector("#cf-dnsend").addEventListener("click", () => {
+    cfBody.querySelector("#cf-dnsend").addEventListener("click", async () => {
       const { cmd, name, ip } = genCmd();
       if (!name) { st.textContent = "先填文件名"; return; }
+      const savePath = cfBody.querySelector("#cf-dnsave").value.trim();
       saveTftpSettings({ cmd_download_ip: ip, cmd_download_name: name });
-      sendToSerial(p, cmd, st, "串口可见执行");
+      // Send via the active serial window; after the push lands in the server
+      // dir, wait for the file then export it to savePath. No tftp_dir set?
+      // Derive the server dir from the chosen save path's folder.
+      const srv = await (async () => {
+        // relay is always tftptmp next to the exe
+        const dir = await defaultTftpDir();
+        if (!dir) { st.textContent = "无法确定服务目录"; return null; }
+        const running = await invoke("tftp_server_status").catch(() => false);
+        if (!running) {
+          st.textContent = "启动 TFTP 服务端…";
+          try {
+            await invoke("tftp_server_start", { args: { dir, port: 69 }, onEvent: channel(() => {}) });
+          } catch (e) { st.textContent = `服务端启动失败: ${e}`; return null; }
+        }
+        return { dir };
+      })();
+      if (!srv) return;
+      const active = window.__devtermActiveSession?.();
+      if (active?.kind !== "serial") { st.textContent = "当前页面不是串口"; return; }
+      if (savePath) {
+        // poll the server dir for the pushed file, then move it to savePath
+        st.textContent = "已发送,等待设备推送…";
+        const deadline = Date.now() + 60000;
+        const poll = setInterval(async () => {
+          if (Date.now() > deadline) { clearInterval(poll); st.textContent = "等待超时:设备未推送文件"; return; }
+          try {
+            const files = await invoke("tftp_list_dir", { dir: srv.dir });
+            if (files.some((f) => f.name === name)) {
+              clearInterval(poll);
+              try {
+                await invoke("tftp_export", { srvDir: srv.dir, name, savePath });
+                st.textContent = `下载完成: ${savePath}`;
+              } catch (e) { st.textContent = `转存失败: ${e}`; }
+              refreshFiles();
+            }
+          } catch (_) {}
+        }, 1000);
+      } else {
+        st.textContent = "已发送到当前串口窗口(文件落在服务目录)";
+      }
+      window.__devtermSendToSession?.(active.id, cmd + "\r");
     });
   });
 
@@ -1101,20 +1562,47 @@ function status5(p, text) {
   if (el) el.textContent = text;
 }
 
-/// Ask user which serial session to type the command into, then write it.
-function sendToSerial(panelEl, cmd, statusEl, note) {
-  const serialSessions = window.__devtermSerialSessions?.() ?? [];
-  if (!serialSessions.length) {
-    statusEl.textContent = "没有活动的串口会话。命令已复制,请手动粘贴。";
-    navigator.clipboard.writeText(cmd).catch(() => {});
-    return;
+/// Send a tftp command straight to the ACTIVE window, but only when it is a
+/// serial session (telnet windows get a refusal - the command is serial-first).
+/// Ensures the TFTP server is running first (relay = tftptmp), copies
+/// localFile into the relay dir when provided.
+async function sendTftpToActive(cmd, statusEl, { localFile } = {}) {
+  const active = window.__devtermActiveSession?.();
+  if (active?.kind !== "serial") {
+    statusEl.textContent = "当前页面不是串口";
+    return false;
   }
-  statusEl.innerHTML = `将在串口可见执行,选择会话: <select id="ses-sel">${serialSessions.map((s) => `<option value="${s.id}">${s.label}</option>`).join("")}</select> <button id="ses-go">发送</button>`;
-  statusEl.querySelector("#ses-go").addEventListener("click", async () => {
-    const id = parseInt(statusEl.querySelector("#ses-sel").value, 10);
-    statusEl.textContent = note;
-    window.__devtermSendToSession?.(id, cmd + "\r");
-  });
+  // relay is always tftptmp next to the exe
+  const dir = await defaultTftpDir();
+  if (!dir) {
+    statusEl.textContent = "无法确定服务目录";
+    return false;
+  }
+  if (localFile) {
+    const name = localFile.split(/[\\/]/).pop();
+    try { await invoke("tftp_copy_in", { src: localFile, name }); } catch (_) {}
+  }
+  const running = await invoke("tftp_server_status").catch(() => false);
+  if (!running) {
+    statusEl.textContent = "启动 TFTP 服务端…";
+    try {
+      const r = await invoke("tftp_server_start", { args: { dir, port: 69 }, onEvent: channel(() => {}) });
+      const m = /随机端口 (\d+)/.exec(r || "");
+      if (m) {
+        // server fell back to a random port: rebuild the command with it
+        const withPort = cmd.includes(" ") ? `${cmd} ${m[1]}` : cmd;
+        statusEl.textContent = "已发送到当前串口窗口";
+        window.__devtermSendToSession?.(active.id, withPort + "\r");
+        return true;
+      }
+    } catch (e) {
+      statusEl.textContent = `服务端启动失败: ${e}`;
+      return false;
+    }
+  }
+  statusEl.textContent = "已发送到当前串口窗口";
+  window.__devtermSendToSession?.(active.id, cmd + "\r");
+  return true;
 }
 
 /* ---------- wiring ---------- */

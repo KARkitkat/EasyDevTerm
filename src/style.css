@@ -107,3 +107,32 @@ input, textarea { user-select: text; }
    (success opens the tab, failure returns to the form). */
 .connect-lock { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.45); z-index: 999; display: flex; align-items: center; justify-content: center; cursor: wait; }
 .connect-lock-box { background: var(--side); border: 1px solid var(--accent); border-radius: 6px; padding: 14px 22px; color: var(--fg); }
+
+/* Transfers button pulsing while a transfer is in flight. */
+@keyframes xfer-pulse { 0%, 100% { color: var(--fg); opacity: 1; } 50% { color: var(--accent); opacity: 0.55; } }
+.xfer-active svg { animation: xfer-pulse 1.1s ease-in-out infinite; }
+
+/* Permission edit dialog: dim overlay + centered card (settings-card look). */
+.perm-dialog { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.45); z-index: 998; display: flex; align-items: center; justify-content: center; }
+.perm-box { background: var(--side); border: 1px solid var(--border); border-radius: 6px; padding: 14px 18px; min-width: 240px; color: var(--fg); }
+.perm-box button { background: var(--accent); color: #fff; border: 0; border-radius: 4px; padding: 6px 12px; cursor: pointer; }
+.perm-box button#perm-cancel { background: transparent; color: var(--accent); border: 1px solid var(--accent); }
+.perm-grid { border-collapse: collapse; margin: 4px auto; }
+.perm-grid th { color: var(--muted); font-weight: 400; padding: 2px 8px; }
+.perm-grid td { padding: 2px 8px; text-align: center; }
+.perm-grid input { accent-color: var(--accent); width: 14px; height: 14px; }
+
+/* Built-in file editor dialog: wide card with a monospace textarea. */
+.editor-box { width: min(720px, 90vw); }
+.ed-wrap { display: flex; align-items: stretch; height: min(60vh, 480px); }
+#ed-gutter { flex: none; width: 44px; margin: 0; padding: 8px 6px 8px 0; background: var(--bg); color: var(--muted); border: 1px solid var(--border); border-right: 0; border-radius: 4px 0 0 4px; font-family: Consolas, "Courier New", monospace; font-size: 12px; line-height: 1.5; text-align: right; overflow: hidden; user-select: none; }
+.editor-box textarea { flex: 1; width: auto; height: 100%; background: var(--bg); color: var(--fg); border: 1px solid var(--border); border-radius: 0 4px 4px 0; padding: 8px; font-family: Consolas, "Courier New", monospace; font-size: 12px; line-height: 1.5; resize: vertical; white-space: pre; overflow-wrap: normal; overflow-x: auto; }
+/* Find & replace bar + goto row under the editor. */
+.ed-findbar { display: flex; gap: 6px; margin-top: 8px; align-items: center; }
+.ed-findbar input { background: var(--bg); color: var(--fg); border: 1px solid var(--border); border-radius: 4px; padding: 5px 8px; min-width: 0; font-size: 12px; }
+.ed-findbar button, .editor-box .row button, .ed-findbar #ed-save, .ed-findbar #ed-goto-go { background: var(--accent); color: #fff; border: 0; border-radius: 4px; padding: 5px 10px; cursor: pointer; }
+.ed-findbar button:hover, .editor-box .row button:hover { filter: brightness(1.15); }
+#ed-find-status { flex: none; min-width: 60px; font-size: 12px; }
+/* goto input matches the findbar inputs; cancel is the outlined variant */
+.ed-goto { flex: none !important; width: 90px; }
+.ed-cancel { background: transparent !important; color: var(--accent) !important; border: 1px solid var(--accent) !important; }

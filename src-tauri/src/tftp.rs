@@ -755,6 +755,19 @@ pub struct DirEntryInfo {
     pub modified: String,
 }
 
+/// Default server dir: `tftptmp` next to the exe, created on demand. Used
+/// when the user never configured tftp_dir so transfers work out of the box.
+#[tauri::command]
+pub fn tftp_default_dir() -> Result<String, String> {
+    let exe = std::env::current_exe().map_err(|e| format!("定位程序目录失败: {e}"))?;
+    let dir = exe
+        .parent()
+        .unwrap_or(&exe)
+        .join("tftptmp");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("创建目录失败: {e}"))?;
+    Ok(dir.to_string_lossy().to_string())
+}
+
 #[tauri::command]
 pub fn tftp_list_dir(dir: String) -> Result<Vec<DirEntryInfo>, String> {
     let mut out = Vec::new();
@@ -886,4 +899,23 @@ pub fn tftp_export(srv_dir: String, name: String, save_path: String) -> Result<(
         "导出失败: {} (文件可能仍被传输线程占用,稍后重试)",
         last_err.map(|e| e.to_string()).unwrap_or_default()
     ))
+}
+
+/// Read a local file as base64 (built-in editor input). 1MB cap: the editor
+/// dialog is a textarea, larger files belong in the download flow.
+#[tauri::command]
+pub fn read_file_base64(path: String) -> Result<String, String> {
+    let meta = std::fs::metadata(&path).map_err(|e| format!("读取失败: {e}"))?;
+    if meta.len() > 1024 * 1024 {
+        return Err("文件过大(>1MB),请使用下载到 PC".into());
+    }
+    let data = std::fs::read(&path).map_err(|e| format!("读取失败: {e}"))?;
+    Ok(crate::serial::base64_encode(&data))
+}
+
+/// Write a local file from base64 (built-in editor output).
+#[tauri::command]
+pub fn write_file_base64(path: String, data_base64: String) -> Result<(), String> {
+    let data = crate::serial::base64_decode(&data_base64).ok_or("bad base64")?;
+    std::fs::write(&path, &data).map_err(|e| format!("写入失败: {e}"))
 }
