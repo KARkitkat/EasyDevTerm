@@ -1,0 +1,28 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "EasyDevTerm",
+  "version": "0.1.0",
+  "identifier": "devterm.local",
+  "build": {
+    "frontendDist": "../src"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "EasyDevTerm - Serial / Telnet",
+        "width": 1100,
+        "height": 760,
+        "minWidth": 800,
+        "minHeight": 550
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": false,
+    "icon": ["icons/icon.ico"]
+  }
+}

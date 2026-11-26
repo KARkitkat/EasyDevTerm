@@ -1,0 +1,26 @@
+# build outputs
+src-tauri/target/
+dist/
+
+# project-local toolchain (~2GB, rebuildable via env.sh + rustup/zig download)
+toolchain/
+
+# downloads stash
+toolchain/dl/
+
+# user runtime data (lives next to the exe on Windows)
+*.exe
+*.dll
+config.json
+cmds.json
+
+# keep vendor xterm dist (needed for build)
+!src/assets/vendor/
+
+# node/pytest style noise
+node_modules/
+__pycache__/
+tools/*/target/
+
+# local debug screenshots
+.shots/

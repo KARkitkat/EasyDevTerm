@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <title>EasyDevTerm</title>
+  <link rel="stylesheet" href="assets/vendor/xterm.css" />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div id="app">
+    <aside id="sidebar">
+      <div class="side-title">EasyDevTerm<div class="side-sub"><span id="app-ver">v…</span> · by karkitkat</div></div>
+      <button id="btn-new" class="side-btn">开始连接</button>
+      <button id="btn-discover" class="side-btn">发现设备</button>
+      <button id="btn-tftp" class="side-btn">TFTP</button>
+      <button id="btn-cmds" class="side-btn">快捷命令</button>
+      <button id="btn-settings" class="side-btn">设置</button>
+    </aside>
+    <main id="main">
+      <div id="term-col">
+        <div id="tabbar"></div>
+        <div id="term-area">
+          <div id="welcome">
+            <h2>EasyDevTerm <span class="muted" style="font-weight:400">by karkitkat</span></h2>
+            <p>串口&telnet开发终端</p>
+            <p id="ipc-check">正在检查后端 IPC…</p>
+            <div class="welcome-feats">
+              <p class="muted" style="margin-top:14px">特性：</p>
+              <ul class="muted">
+                <li>自动发现telnet</li>
+                <li>集成tftp，可视化文件操作</li>
+                <li>自动登录、快捷命令、快速连接等</li>
+              </ul>
+            </div>
+          </div>
+        </div>
+      </div>
+    </main>
+  </div>
+  <script src="assets/vendor/xterm.js"></script>
+  <script src="assets/vendor/addon-fit.js"></script>
+  <script type="module" src="app.js"></script>
+</body>
+</html>
