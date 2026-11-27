@@ -1730,115 +1730,282 @@ export function initPanels() {
 export async function showCmdsPanel() {
   const p = ensurePanel("快捷命令");
   const cmds = await invoke("cmds_list").catch(() => []);
-  const pathStr = await invoke("cmds_path_str").catch(() => "cmds.json");
 
   p.innerHTML = `
     <h3>快捷命令</h3>
-    <p class="muted">点击命令 → 选择会话发送。存储: <span style="word-break:break-all">${pathStr}</span></p>
-    <div class="row">
-      <button id="qc-add" style="flex:1">+ 添加命令</button>
-      <button id="qc-edit" style="flex:1">编辑全部</button>
+    <p class="muted" id="qc-status"></p>
+    <div class="settings-card">
+      <div class="sc-head">
+        <span class="sc-title">命令</span>
+      </div>
+      <div id="qc-list"></div>
+      <div class="row" style="margin-top:8px">
+        <button id="qc-add-cmd" style="flex:1">+ 添加命令</button>
+        <button id="qc-add-folder" style="flex:1">+ 添加文件夹</button>
+      </div>
     </div>
-    <div id="qc-list"></div>
   `;
   const list = p.querySelector("#qc-list");
-  const sessions = window.__devtermAllSessions?.() ?? [];
+  const status = p.querySelector("#qc-status");
 
+  const save = () => invoke("cmds_save", { cmds }).catch((e) => { status.textContent = String(e); });
+
+  /// Render grouped commands: folder headers + command rows with edit/delete.
+  /// Entries with `folder: true` are EMPTY folders (marker entries).
   function render() {
+    const folders = cmds.filter((c) => c.folder).map((c) => c.group);
+    const realCmds = cmds.filter((c) => !c.folder);
     const groups = new Map();
-    for (const c of cmds) {
+    const order = [];
+    // declared (possibly still empty) folders come first
+    for (const f of folders) {
+      if (!groups.has(f)) {
+        groups.set(f, []);
+        order.push(f);
+      }
+    }
+    for (const c of realCmds) {
       const g = c.group || "未分组";
-      if (!groups.has(g)) groups.set(g, []);
+      if (!groups.has(g)) {
+        groups.set(g, []);
+        order.push(g);
+      }
       groups.get(g).push(c);
     }
-    list.innerHTML = [...groups.entries()]
-      .map(
-        ([g, items]) => `
-        <p class="muted" style="margin:8px 0 4px">${g}</p>
+    list.innerHTML = order
+      .map((g) => {
+        const items = groups.get(g) ?? [];
+        return `
+        <div class="list-item qc-folder" data-group="${encodeURIComponent(g)}" style="cursor:default"><span class="qc-caret" style="cursor:pointer;flex:none;line-height:0"><svg viewBox="0 0 16 16" width="12" height="12" style="transition:transform .15s"><path d="M5 6l3 3 3-3" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg></span> <span style="flex:1"><b>📁 ${g}</b></span> <span class="qc-folder-del muted" title="删除文件夹" style="cursor:pointer">✕</span> <button class="rb-dl qc-folder-edit" title="重命名文件夹"><svg viewBox="0 0 16 16" width="14" height="14"><path d="M11.5 2.5a1.4 1.4 0 0 1 2 2L6 12l-3 1 1-3z" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg></button></div>
+        <div class="qc-folder-body" data-folder="${encodeURIComponent(g)}">
         ${items
           .map(
             (c) =>
-              `<div class="list-item qc-item" data-name="${encodeURIComponent(c.name)}"><div style="flex:1;overflow:hidden;text-overflow:ellipsis"><b>${c.name}</b><br><span class="muted" style="font-size:11px">${c.cmd.replace(/</g, "&lt;")}</span></div></div>`
+              `<div class="list-item qc-item" data-name="${encodeURIComponent(c.name)}" data-group="${encodeURIComponent(g)}"><div style="flex:1;overflow:hidden;text-overflow:ellipsis"><b>${c.name}</b><br><span class="muted" style="font-size:11px">${c.cmd.replace(/</g, "&lt;")}</span></div> <span class="qc-del muted" title="删除命令" style="cursor:pointer">✕</span> <button class="rb-dl qc-edit" title="编辑命令"><svg viewBox="0 0 16 16" width="14" height="14"><path d="M11.5 2.5a1.4 1.4 0 0 1 2 2L6 12l-3 1 1-3z" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg></button></div>`
           )
-          .join("")}`
-      )
+          .join("")}
+        ${!items.length ? `<p class="muted" style="margin:4px 0 2px;padding-left:18px;font-size:12px">(空文件夹)</p>` : ""}
+        </div>`;
+      })
       .join("");
+
+    // Folder header click (not on ✕/pencil): toggle its command list. The
+    // caret chevron rotates -90° when collapsed.
+    list.querySelectorAll(".qc-folder").forEach((el) => {
+      el.addEventListener("click", (ev) => {
+        if (ev.target.closest(".qc-folder-del") || ev.target.closest(".qc-folder-edit")) return;
+        const body = el.nextElementSibling; // .qc-folder-body
+        const caretSvg = el.querySelector(".qc-caret svg");
+        const show = body.style.display !== "none";
+        body.style.display = show ? "none" : "";
+        caretSvg.style.transform = show ? "rotate(-90deg)" : "";
+      });
+    });
+
+    // Click a command: send to the ACTIVE session; quiet on success.
     list.querySelectorAll(".qc-item").forEach((el) => {
-      el.addEventListener("click", () => {
+      el.addEventListener("click", async (ev) => {
+        if (ev.target.closest(".qc-edit") || ev.target.closest(".qc-del")) return;
         const name = decodeURIComponent(el.dataset.name);
-        const c = cmds.find((x) => x.name === name);
+        const group = decodeURIComponent(el.dataset.group || "");
+        const c = cmds.find((x) => x.name === name && (x.group || "未分组") === group);
         if (!c) return;
-        // Send straight to the ACTIVE window (whatever tab the user is on).
         const active = window.__devtermActiveSession?.();
-        if (active?.id != null) {
-          const sessLabel = sessions.find((s) => s.id === active.id)?.label ?? active.kind;
-          window.__devtermSendToSession?.(active.id, c.cmd + "\r");
-          el.insertAdjacentHTML(
-            "afterend",
-            `<p class="muted qc-flash">已发送到 ${sessLabel} → ${c.cmd.replace(/</g, "&lt;")}</p>`
-          );
-          const note = el.nextElementSibling;
-          setTimeout(() => note?.remove(), 2500);
+        if (active?.id == null) {
+          status.textContent = "当前未打开任何窗口,无法发送";
           return;
         }
-        // No active window: copy as fallback.
-        navigator.clipboard.writeText(c.cmd).catch(() => {});
-        el.insertAdjacentHTML("afterend", `<p class="muted">没有活动窗口,命令已复制到剪贴板</p>`);
-        const note = el.nextElementSibling;
-        setTimeout(() => note?.remove(), 2500);
+        const ok = await window.__devtermSendToSessionPromise?.(active.id, c.cmd + "\r");
+        status.textContent = ok ? "" : "发送失败: 会话已断开";
+      });
+    });
+    // Edit command: dialog with name/cmd/group fields.
+    list.querySelectorAll(".qc-edit").forEach((el) => {
+      el.addEventListener("click", async (ev) => {
+        ev.stopPropagation();
+        const item = ev.target.closest(".qc-item");
+        const name = decodeURIComponent(item.dataset.name);
+        const group = decodeURIComponent(item.dataset.group || "");
+        const idx = cmds.findIndex((x) => x.name === name && (x.group || "未分组") === group);
+        if (idx < 0) return;
+        const folders = [...new Set(cmds.map((x) => x.group).filter(Boolean))];
+        cmdDialog(cmds[idx], async (updated) => {
+          cmds[idx] = updated;
+          await save();
+          render();
+        }, folders);
+      });
+    });
+    // Delete command.
+    list.querySelectorAll(".qc-del").forEach((el) => {
+      el.addEventListener("click", async (ev) => {
+        ev.stopPropagation();
+        const item = ev.target.closest(".qc-item");
+        const name = decodeURIComponent(item.dataset.name);
+        const group = decodeURIComponent(item.dataset.group || "");
+        const idx = cmds.findIndex((x) => x.name === name && (x.group || "未分组") === group);
+        if (idx < 0) return;
+        cmds.splice(idx, 1);
+        await save();
+        render();
+      });
+    });
+    // Rename folder: updates marker + every command inside it.
+    list.querySelectorAll(".qc-folder-edit").forEach((el) => {
+      el.addEventListener("click", async (ev) => {
+        ev.stopPropagation();
+        const folder = decodeURIComponent(ev.target.closest(".qc-folder").dataset.group);
+        folderDialog(folder, async (newName) => {
+          if (!newName || newName === folder) return;
+          for (const c of cmds) {
+            if (c.folder && c.group === folder) c.group = newName;
+            else if ((c.group || "未分组") === folder) c.group = newName;
+          }
+          await save();
+          render();
+        });
+      });
+    });
+    // Delete folder: removes the marker entry and every command inside it.
+    list.querySelectorAll(".qc-folder-del").forEach((el) => {
+      el.addEventListener("click", async (ev) => {
+        ev.stopPropagation();
+        const folder = decodeURIComponent(ev.target.closest(".qc-folder").dataset.group);
+        const n = cmds.filter((c) => !c.folder && (c.group || "未分组") === folder).length;
+        if (n > 0 && !confirm(`文件夹"${folder}"里有 ${n} 个命令,一并删除?`)) return;
+        for (let i = cmds.length - 1; i >= 0; i--) {
+          const c = cmds[i];
+          if (c.folder && c.group === folder) cmds.splice(i, 1);
+          else if (!c.folder && (c.group || "未分组") === folder) cmds.splice(i, 1);
+        }
+        await save();
+        render();
       });
     });
   }
 
-  p.querySelector("#qc-add").addEventListener("click", () => {
-    const name = prompt("命令名称:");
-    if (!name) return;
-    const cmd = prompt("命令内容:");
-    if (!cmd) return;
-    const group = prompt("分组(留空=未分组):") || "";
-    cmds.push({ name, cmd, group });
-    invoke("cmds_save", { cmds }).then(render);
-  });
-
-  p.querySelector("#qc-edit").addEventListener("click", () => {
-    cfEditDialog(p, cmds, () => render());
-  });
-
-  function cfEditDialog(p, cmds, onDone) {
-    // simple textarea JSON editor
-    p.querySelector("#qc-list").insertAdjacentHTML(
-      "beforebegin",
-      `<div id="qc-json" style="margin-bottom:8px">
-        <textarea id="qc-json-text" style="width:100%;height:200px;background:var(--bg);color:var(--fg);border:1px solid var(--border);border-radius:4px;font-family:Consolas,monospace;font-size:11px"></textarea>
-        <div class="row" style="margin-top:4px">
-          <button id="qc-json-save" style="flex:1">保存 JSON</button>
-          <button id="qc-json-cancel" style="flex:1">取消</button>
+  /// Command add/edit dialog (perm-dialog family: labels + dark inputs).
+  /// `folders` feeds a custom dropdown (datalist is unreliable in WebView2:
+  /// it only opens on typing/focus and its arrow is invisible in dark themes).
+  function cmdDialog(initial, onOk, folders = []) {
+    const ov = document.createElement("div");
+    ov.className = "perm-dialog";
+    ov.innerHTML = `
+      <div class="perm-box editor-box" style="width:min(420px,90vw)">
+        <p class="sc-title">${initial ? "编辑命令" : "添加命令"}</p>
+        <div class="row"><span class="sc-label" style="width:70px">名称</span><input id="cmd-name" value="${escAttr(initial?.name || "")}" placeholder="如 查看系统信息" /></div>
+        <div class="row"><span class="sc-label" style="width:70px">命令</span><input id="cmd-body" value="${escAttr(initial?.cmd || "")}" placeholder="如 uname -a" /></div>
+        <div class="row"><span class="sc-label" style="width:70px">文件夹</span>
+          <div style="flex:1;position:relative">
+            <input id="cmd-group" value="${escAttr(initial?.group || "")}" placeholder="留空=未分组" style="padding-right:26px" />
+            <button id="cmd-group-btn" class="rb-dl" title="选择文件夹" style="position:absolute;right:6px;top:6px;bottom:6px;padding:2px"><svg viewBox="0 0 16 16" width="12" height="12"><path d="M3.5 5.5 8 10l4.5-4.5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+            <div id="cmd-group-list" style="display:none;position:absolute;left:0;right:0;top:calc(100% + 2px);background:var(--side);border:1px solid var(--border);border-radius:4px;max-height:180px;overflow-y:auto;z-index:10"></div>
+          </div>
         </div>
-      </div>`
-    );
-    const ta = p.querySelector("#qc-json-text");
-    ta.value = JSON.stringify(cmds, null, 2);
-    const box = p.querySelector("#qc-json");
-    box.querySelector("#qc-json-cancel").addEventListener("click", () => box.remove());
-    box.querySelector("#qc-json-save").addEventListener("click", async () => {
-      try {
-        const parsed = JSON.parse(ta.value);
-        if (!Array.isArray(parsed)) throw new Error("必须是数组");
-        for (const c of parsed) {
-          if (!c.name || !c.cmd) throw new Error("每项需要 name 和 cmd");
-        }
-        await invoke("cmds_save", { cmds: parsed });
-        cmds.length = 0;
-        parsed.forEach((c) =>
-          cmds.push({ name: c.name, cmd: c.cmd, group: c.group || "" })
-        );
-        box.remove();
-        onDone();
-      } catch (e) {
-        alert("JSON 错误: " + e);
+        <div class="row" style="margin-top:8px">
+          <button id="cmd-ok" style="flex:1">确定</button>
+          <button id="cmd-cancel" class="ed-cancel" style="flex:1">取消</button>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(ov);
+    // custom folder dropdown
+    const groupInput = ov.querySelector("#cmd-group");
+    const groupList = ov.querySelector("#cmd-group-list");
+    ov.querySelector("#cmd-group-btn").addEventListener("click", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      if (groupList.style.display !== "none") {
+        groupList.style.display = "none";
+        return;
+      }
+      const items = folders.length
+        ? folders.map((f) => `<div class="qc-opt" style="padding:10px 10px" data-v="${escAttr(f)}">${f}</div>`).join("")
+        : `<div class="muted" style="padding:10px;font-size:12px">(暂无文件夹,直接输入名称)</div>`;
+      groupList.innerHTML = items;
+      groupList.style.display = "block";
+    });
+    groupList.addEventListener("click", (e) => {
+      const opt = e.target.closest(".qc-opt");
+      if (!opt) return;
+      groupInput.value = opt.dataset.v;
+      groupList.style.display = "none";
+    });
+    // click elsewhere closes the dropdown
+    ov.addEventListener("click", (e) => {
+      if (!e.target.closest("#cmd-group-btn") && !e.target.closest("#cmd-group-list")) {
+        groupList.style.display = "none";
       }
     });
+    const nameInput = ov.querySelector("#cmd-name");
+    nameInput.focus();
+    const close = () => ov.remove();
+    ov.querySelector("#cmd-cancel").addEventListener("click", close);
+    ov.querySelectorAll("input").forEach((inp) =>
+      inp.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") ov.querySelector("#cmd-ok").click();
+        if (e.key === "Escape") close();
+      })
+    );
+    ov.querySelector("#cmd-ok").addEventListener("click", () => {
+      const name = ov.querySelector("#cmd-name").value.trim();
+      const cmd = ov.querySelector("#cmd-body").value.trim();
+      const group = ov.querySelector("#cmd-group").value.trim();
+      if (!name || !cmd) return;
+      close();
+      onOk({ name, cmd, group });
+    });
   }
+
+  /// Folder name dialog (same perm-box style). `initial` prefills for rename.
+  function folderDialog(initial, onOk) {
+    const ov = document.createElement("div");
+    ov.className = "perm-dialog";
+    ov.innerHTML = `
+      <div class="perm-box" style="width:min(380px,90vw)">
+        <p class="sc-title">${initial ? "重命名文件夹" : "添加文件夹"}</p>
+        <div class="row"><span class="sc-label" style="width:70px">名称</span><input id="folder-name" value="${escAttr(initial || "")}" placeholder="文件夹名称" /></div>
+        <div class="row" style="margin-top:8px">
+          <button id="folder-ok" style="flex:1">确定</button>
+          <button id="folder-cancel" class="ed-cancel" style="flex:1">取消</button>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(ov);
+    const input = ov.querySelector("#folder-name");
+    input.focus();
+    input.select();
+    const close = () => ov.remove();
+    ov.querySelector("#folder-cancel").addEventListener("click", close);
+    input.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") ov.querySelector("#folder-ok").click();
+      if (e.key === "Escape") close();
+    });
+    ov.querySelector("#folder-ok").addEventListener("click", () => {
+      const name = input.value.trim();
+      if (!name) return;
+      close();
+      onOk(name);
+    });
+  }
+
+  // Add command: empty dialog, folder datalist from existing groups.
+  p.querySelector("#qc-add-cmd").addEventListener("click", () => {
+    const folders = [...new Set(cmds.map((x) => x.group).filter(Boolean))];
+    cmdDialog(null, (c) => {
+      cmds.push(c);
+      save().then(render);
+    }, folders);
+  });
+
+  // Add folder: a marker entry (folder: true) renders as an empty folder.
+  p.querySelector("#qc-add-folder").addEventListener("click", () => {
+    folderDialog(null, async (name) => {
+      cmds.push({ name: "", cmd: "", group: name, folder: true });
+      await save();
+      render();
+    });
+  });
 
   render();
 }

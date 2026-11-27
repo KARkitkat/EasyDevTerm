@@ -79,6 +79,18 @@ input, textarea { user-select: text; }
 .qc-send select { flex: 1; background: var(--bg); color: var(--fg); border: 1px solid var(--border); border-radius: 4px; padding: 4px; min-width: 0; }
 .qc-send button { background: var(--accent); color: #fff; border: 0; border-radius: 4px; padding: 4px 10px; cursor: pointer; }
 
+/* Quick commands: flex rows (same family as TFTP's .rb-entry) so the edit
+   and delete buttons line up on the right edge. */
+.qc-folder, .qc-item { display: flex; align-items: center; gap: 6px; }
+.qc-del, .qc-folder-del { flex: none; }
+.qc-folder .rb-dl, .qc-item .rb-dl { flex: none; }
+/* Folder dropdown options inside the cmd dialog. */
+.qc-opt { padding: 10px 10px; cursor: pointer; }
+.qc-opt:hover { background: var(--bg); color: var(--accent); }
+/* The folder field wraps its input in a relative div (for the dropdown
+   button); make that input fill the wrapper so all three fields align. */
+.perm-box input#cmd-group { width: 100%; flex: none; box-sizing: border-box; }
+
 /* Settings panel: one card per setting group (more groups will come). */
 .settings-card { border: 1px solid var(--border); border-radius: 6px; padding: 12px; margin-bottom: 12px; }
 .sc-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; }

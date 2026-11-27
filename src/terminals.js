@@ -48,6 +48,18 @@ window.__devtermSendToSession = (id, text) => {
     sessions._dataCb?.(id, text);
   }
 };
+/// Promise-flavored send for callers that need to know whether the write
+/// went through. Resolves false when the session is gone/dead or errored.
+window.__devtermSendToSessionPromise = async (id, text) => {
+  const s = sessions.get(id);
+  if (!s || s.dead) return false;
+  try {
+    await sessions._dataCb?.(id, text);
+    return true;
+  } catch (_) {
+    return false;
+  }
+};
 // Telnet session targets (label "telnet <ip>[:port]") for the browser.
 window.__devtermTelnetIps = () =>
   [...sessions.values()]

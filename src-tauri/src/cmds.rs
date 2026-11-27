@@ -11,6 +11,10 @@ pub struct QuickCmd {
     pub cmd: String,
     #[serde(default)]
     pub group: String,
+    /// Marker for an EMPTY folder entry: renders a folder header with no
+    /// commands. Name is stored in `group`; `name` is a reserved sentinel.
+    #[serde(default)]
+    pub folder: bool,
 }
 
 fn cmds_path() -> std::path::PathBuf {
@@ -29,17 +33,14 @@ pub fn cmds_list() -> Vec<QuickCmd> {
                 QuickCmd {
                     name: "查看系统信息".into(),
                     cmd: "uname -a".into(),
-                    group: "常用".into(),
+                    group: "收藏".into(),
+                    folder: false,
                 },
                 QuickCmd {
                     name: "内存占用".into(),
                     cmd: "free -m".into(),
-                    group: "常用".into(),
-                },
-                QuickCmd {
-                    name: "无线日志".into(),
-                    cmd: "logread | grep wireless".into(),
-                    group: "调试".into(),
+                    group: "收藏".into(),
+                    folder: false,
                 },
             ]
         })
